@@ -28,7 +28,7 @@ Code Weaver offers several key improvements that enhance the user experience and
 
 1.  **Clone the repository:**
      ```bash
-     git clone https://github.com/your-username/your-repo-name.git
+     https://github.com/WHITELOTUS0/chat-with-a-repo.git
      ```
 2.  **Navigate to the Project Directory:**
 
