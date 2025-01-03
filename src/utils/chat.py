@@ -1,65 +1,102 @@
-import argparse
+# src/utils/chat.py
 import os
+import tempfile
+import streamlit as st
 from langchain_community.vectorstores import DeepLake
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.chat_models import ChatOpenAI
 from langchain.chains import RetrievalQA
 import openai
-import streamlit as st
 from streamlit_chat import message
+from src.utils.process import process
+from src.utils.load_and_split import load_docs, split_docs
+import shutil
+from langchain.cache import InMemoryCache
+from langchain.globals import set_llm_cache
+set_llm_cache(InMemoryCache())
 
 
-def run_chat_app(activeloop_dataset_path):
+def run_chat_app():
     """Run the chat application using the Streamlit framework."""
-    # Set the title for the Streamlit app
-    st.title(f"{os.path.basename(activeloop_dataset_path)} GPT")
+    st.title("Code Weaver")  # App title
 
-    # Set the OpenAI API key from the environment variable
-    openai.api_key = os.environ.get("OPENAI_API_KEY")
-
-    # Create an instance of OpenAIEmbeddings
-    embeddings = OpenAIEmbeddings()
-
-    # Create an instance of DeepLake with the specified dataset path and embeddings
-    db = DeepLake(
-        dataset_path=activeloop_dataset_path,
-        read_only=True,
-        embedding_function=embeddings,
-    )
-
-    # Initialize the session state for generated responses and past inputs
+    # Initialize session state variables if they don't exist
     if "generated" not in st.session_state:
-        st.session_state["generated"] = ["i am ready to help you ser"]
-
+        st.session_state["generated"] = ["I am ready to help you!"]
     if "past" not in st.session_state:
-        st.session_state["past"] = ["hello"]
+        st.session_state["past"] = ["Hello"]
 
-    # Get the user's input from the text input field
-    user_input = get_text()
+    # Initialize data and status in the session
+    if "data" not in st.session_state:
+            st.session_state["data"] = {
+                "repo_url": None,
+                "include_file_extensions": None,
+                "activeloop_dataset_path": None,
+                "repo_destination": None,
+                "status": "Please Provide Data"
+            }
+    # Sidebar for API keys and data
+    with st.sidebar:
+        st.header("Configuration")
+        # Open AI key
+        openai_api_key = st.text_input("OpenAI API Key", type="password")
+        if openai_api_key:
+            os.environ["OPENAI_API_KEY"] = openai_api_key
+        #activeloop key
+        activeloop_token = st.text_input("Activeloop Token", type="password")
+        if activeloop_token:
+            os.environ["ACTIVELOOP_TOKEN"] = activeloop_token
+        # activeloop username
+        activeloop_username = st.text_input("Activeloop Username")
+        if activeloop_username:
+            os.environ["ACTIVELOOP_USERNAME"] = activeloop_username
 
-    # If there is user input, search for a response using the search_db function
-    if user_input:
-        output = search_db(db, user_input)
-        st.session_state.past.append(user_input)
-        st.session_state.generated.append(output)
 
-    # If there are generated responses, display the conversation using Streamlit
-    # messages
-    if st.session_state["generated"]:
-        for i in range(len(st.session_state["generated"])):
-            message(st.session_state["past"][i], is_user=True, key=str(i) + "_user")
-            message(st.session_state["generated"][i], key=str(i))
+        st.session_state["data"]["repo_url"] = st.text_input("GitHub Repository URL")
+        file_extensions_input = st.text_input("File Extensions (comma-separated, e.g., .py,.js)").strip()
+        st.session_state["data"]["include_file_extensions"] = [ext.strip() for ext in file_extensions_input.split(",")] if file_extensions_input else None
+
+        dataset_name = st.text_input("Dataset Name")
+        if dataset_name:
+              st.session_state["data"]["activeloop_dataset_path"] = f"hub://{os.environ.get('ACTIVELOOP_USERNAME')}/{dataset_name}"
+        else:
+           st.session_state["data"]["activeloop_dataset_path"] = None
+        
+        st.session_state["data"]["repo_destination"] = "repos"
+        
+        if st.button("Process Repository"):
+            if st.session_state["data"]["repo_url"] and st.session_state["data"]["activeloop_dataset_path"] and os.environ.get("OPENAI_API_KEY") and os.environ.get("ACTIVELOOP_TOKEN") and os.environ.get("ACTIVELOOP_USERNAME") :
+                st.session_state["data"]["status"] = "Processing Data"
+                with st.spinner("Processing the repository, please wait"):
+                    process_repo()
+                st.session_state["data"]["status"] = "Ready to Chat!"
+            else :
+              st.session_state["data"]["status"] = "Missing Data"
 
 
-def generate_response(prompt):
+    # Chat input and display area
+    st.write(st.session_state["data"]["status"])
+    if  st.session_state["data"]["status"] == "Ready to Chat!":
+        user_input = get_text()
+        if user_input:
+            output = search_db(user_input)
+            st.session_state.past.append(user_input)
+            st.session_state.generated.append(output)
+        if st.session_state["generated"]:
+            for i in range(len(st.session_state["generated"])):
+                message(st.session_state["past"][i], is_user=True, key=str(i) + "_user")
+                message(st.session_state["generated"][i], key=str(i))
+    # Footer
+    st.markdown(
     """
-    Generate a response using OpenAI's ChatCompletion API and the specified prompt.
-    """
-    completion = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo", messages=[{"role": "user", "content": prompt}]
-    )
-    response = completion.choices[0].message.content
-    return response
+    <br><hr style="border:2px solid gray">
+    <p style="text-align:center; font-size: 12px;">
+        Made with ❤️ by <a href="https://www.linkedin.com/in/glorry-sibomana/">Glorry Sibomana</a>
+    </p>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 
 def get_text():
@@ -68,31 +105,49 @@ def get_text():
     return input_text
 
 
-
-def search_db(db, query):
+def search_db(query):
     """Search for a response to the query in the DeepLake database."""
-    # Create a retriever from the DeepLake instance
-    retriever = db.as_retriever()
+    # Set up embeddings and database
+    embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
+    db = DeepLake(
+       dataset_path=st.session_state["data"]["activeloop_dataset_path"],
+       read_only=True,
+       embedding_function=embeddings,
+    )
 
-    # Update the search parameters
+    # Set up retriever with custom search parameters
+    retriever = db.as_retriever()
     retriever.search_kwargs["distance_metric"] = "cos"
     retriever.search_kwargs["fetch_k"] = 100
-    retriever.search_kwargs["k"] = 10  # Remove "maximal_marginal_relevance"
+    retriever.search_kwargs["k"] = 10
 
-    # Create a ChatOpenAI model instance
+    # Initialize chat model
     model = ChatOpenAI(model="gpt-3.5-turbo")
 
-    # Create a RetrievalQA instance from the model and retriever
+    # Set up RetrievalQA chain
     qa = RetrievalQA.from_llm(model, retriever=retriever)
-
-    # Return the result of the query
     return qa.run(query)
 
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--activeloop_dataset_path", type=str, required=True)
-    args = parser.parse_args()
 
-    run_chat_app(args.activeloop_dataset_path)
+def process_repo():
+  """Process the repository and save embeddings into Deep Lake dataset."""
+
+  with tempfile.TemporaryDirectory() as temp_dir:
+    repo_destination = os.path.join(temp_dir, "repo_clone")
+
+    repo_url = st.session_state["data"]["repo_url"]
+    include_file_extensions = st.session_state["data"]["include_file_extensions"]
+    activeloop_dataset_path = st.session_state["data"]["activeloop_dataset_path"]
+
+    process(
+        repo_url,
+        include_file_extensions,
+        activeloop_dataset_path,
+        repo_destination,
+        )
+
+
+if __name__ == "__main__":
+    run_chat_app()
